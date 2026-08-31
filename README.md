@@ -1,9 +1,7 @@
 # PP-GBD Reproducibility Package
 
 **Paper:** *PP-GBD: Privacy-Preserving Graph Neural Botnet Detection in Encrypted Traffic*  
-**Authors:** Md Manirul Islam, Umme Salsabil, Md. Mushfiqur Rahman, and Sazzad Hossain  
 **Version:** 1.0.0  
-**Repository:** https://github.com/mdmanirulislam/PP-GBD
 
 This repository contains the synthetic benchmark generator, NumPy/SciPy implementation, per-seed results, privacy accountant, figure-generation scripts, and result tables used in the paper.
 
@@ -89,4 +87,4 @@ On Windows PowerShell, individual files can be checked with `Get-FileHash -Algor
 
 ## License and citation
 
-The complete repository is distributed under the MIT License. Citation metadata are provided in `CITATION.cff` and `.zenodo.json`. The canonical source repository is https://github.com/mdmanirulislam/PP-GBD.
+The complete repository is distributed under the MIT License. Citation metadata are provided in `CITATION.cff` and `.zenodo.json`.
