@@ -1,0 +1,6 @@
+mode,train_s,infer_ms_per_graph,peak_traced_memory_mb,model_kib_float32,communication_mib_float32
+GCN,66.74,6.271,12.62,19.25,0.00
+GCN-poly,95.47,10.320,12.62,19.25,0.00
+DP-GCN-eps4,47.25,6.271,12.62,19.25,0.00
+DP-MLP-eps4,40.69,4.596,11.09,19.25,0.00
+FedAvg,129.41,6.271,12.54,19.25,9.03

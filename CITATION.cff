@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "Please cite the accompanying paper and this reproducibility package."
+title: "PP-GBD Reproducibility Package"
+type: software
+version: 1.1.0
+date-released: 2026-09-26
+repository-code: "https://github.com/mdmanirulislam/PP-GBD"
+url: "https://github.com/mdmanirulislam/PP-GBD"
+authors:
+  - family-names: Islam
+    given-names: Md Manirul
+    affiliation: American International University-Bangladesh
+    email: manirul@aiub.edu
+  - family-names: Rahman
+    given-names: Md. Mushfiqur
+    affiliation: Samarkand State University named after Sharof Rashidov
+    email: mushfique98@gmail.com
+  - family-names: Salsabil
+    given-names: Umme
+    affiliation: British Columbia Institute of Technology
+    email: usalsabil@bcit.ca
+  - family-names: Hossain
+    given-names: Sazzad
+    affiliation: Samarkand State University named after Sharof Rashidov
+    email: sazzad69@gmail.com
+license: MIT
+keywords:
+  - botnet detection
+  - graph neural networks
+  - differential privacy
+  - federated learning
+  - encrypted traffic
+abstract: "Synthetic benchmark, graph neural network implementation, fixed-slot graph-level differential privacy accountant, and federated-learning experiments for privacy-preserving botnet detection in encrypted traffic."

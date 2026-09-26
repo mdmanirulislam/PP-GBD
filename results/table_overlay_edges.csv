@@ -1,0 +1,5 @@
+topology,contact_records,unique_undirected,edges_added
+C2,209.9,209.7,209.3
+DEBRUIJN,254.0,253.0,252.7
+KADEMLIA,896.0,769.2,768.4
+CHORD,512.0,512.0,511.4

@@ -85,9 +85,9 @@ plt.close(fig)
 # Fig. 4: privacy-utility plot.
 eps = [1.0, 2.0, 4.0, 8.0]
 f1m = [r["dp"]["by_epsilon"][str(e)]["f1"]["mean"] for e in eps]
-f1s = [r["dp"]["by_epsilon"][str(e)]["f1"]["std"] for e in eps]
+f1s = [r["dp"]["by_epsilon"][str(e)]["f1"]["ci95"] for e in eps]
 aucm = [r["dp"]["by_epsilon"][str(e)]["auc"]["mean"] for e in eps]
-aucs = [r["dp"]["by_epsilon"][str(e)]["auc"]["std"] for e in eps]
+aucs = [r["dp"]["by_epsilon"][str(e)]["auc"]["ci95"] for e in eps]
 fig, ax = plt.subplots(figsize=(3.41, 2.51), dpi=300)
 ax.axhline(r["models"]["GCN"]["f1"]["mean"], ls="--", lw=0.75, label="Non-private F1")
 ax.errorbar(eps, f1m, yerr=f1s, marker="o", lw=1.25, capsize=2.5, label="F1")
@@ -114,12 +114,12 @@ def write_csv(filename, header, rows):
 
 
 def pm(rec):
-    return f"{rec['mean']:.4f}+/-{rec['std']:.4f}"
+    return f"{rec['mean']:.4f}+/-{rec['ci95']:.4f}"
 
 
 write_csv(
     "table_models.csv",
-    ["model", "precision", "recall", "f1", "roc_auc", "average_precision", "train_s", "infer_ms_per_graph"],
+    ["model", "precision_95ci", "recall_95ci", "f1_95ci", "roc_auc_95ci", "average_precision_95ci", "train_s", "infer_ms_per_graph"],
     [[name] + [pm(r["models"][name][k]) for k in ["precision", "recall", "f1", "auc", "average_precision"]]
      + [f"{r['models'][name]['train_time_s']['mean']:.2f}",
         f"{r['models'][name]['infer_time_per_graph_ms']['mean']:.3f}"]
@@ -127,17 +127,62 @@ write_csv(
 )
 write_csv(
     "table_per_topology.csv",
-    ["model", "topology", "precision", "recall", "f1", "roc_auc"],
+    ["model", "topology", "precision_95ci", "recall_95ci", "f1_95ci", "roc_auc_95ci"],
     [[name, topo] + [pm(r["models_per_topology"][name][topo][k])
                      for k in ["precision", "recall", "f1", "auc"]]
      for name in ["LR", "MLP", "GCN"] for topo in r["config"]["topologies"]]
 )
 write_csv(
     "table_dp.csv",
-    ["epsilon", "sigma", "precision", "recall", "f1", "roc_auc", "host_loss_diagnostic_auc"],
+    ["epsilon", "sigma", "precision_95ci", "recall_95ci", "f1_95ci", "roc_auc_95ci", "host_loss_diagnostic_auc_95ci"],
     [[e, f"{float(r['dp']['sigma_map'][str(e)]):.4f}"]
      + [pm(r["dp"]["by_epsilon"][str(e)][k]) for k in ["precision", "recall", "f1", "auc"]]
      + [pm(r["dp"]["by_epsilon"][str(e)]["node_loss_mia_auc"])]
      for e in eps]
 )
+
+write_csv(
+    "table_clipping.csv",
+    ["clip_norm", "f1_95ci", "roc_auc_95ci", "clipped_fraction_95ci"],
+    [[c,
+      pm(r["ablations"]["clipping_sweep"][str(c)]["f1"]),
+      pm(r["ablations"]["clipping_sweep"][str(c)]["auc"]),
+      pm(r["ablations"]["clipping_sweep"][str(c)]["clipped_fraction"])]
+     for c in [0.25, 0.5, 1.0, 2.0]]
+)
+
+write_csv(
+    "table_private_baseline.csv",
+    ["model", "epsilon", "f1_95ci", "roc_auc_95ci"],
+    [["DP-MLP", 4.0,
+      pm(r["ablations"]["dp_mlp_eps4"]["f1"]),
+      pm(r["ablations"]["dp_mlp_eps4"]["auc"])],
+     ["DP-GCN", 4.0,
+      pm(r["dp"]["by_epsilon"]["4.0"]["f1"]),
+      pm(r["dp"]["by_epsilon"]["4.0"]["auc"])]]
+)
+
+write_csv(
+    "table_overlay_edges.csv",
+    ["topology", "contact_records", "unique_undirected", "edges_added"],
+    [[topo,
+      f"{r['overlay_edges'][topo]['overlay_contact_records']['mean']:.1f}",
+      f"{r['overlay_edges'][topo]['overlay_unique_edges']['mean']:.1f}",
+      f"{r['overlay_edges'][topo]['overlay_added_edges']['mean']:.1f}"]
+     for topo in r["config"]["topologies"]]
+)
+
+if "cost_benchmark" in r:
+    write_csv(
+        "table_cost.csv",
+        ["mode", "train_s", "infer_ms_per_graph", "peak_traced_memory_mb",
+         "model_kib_float32", "communication_mib_float32"],
+        [[name,
+          f"{row['train_time_s']:.2f}",
+          f"{row['infer_time_per_graph_ms']:.3f}",
+          f"{row['peak_traced_memory_mb']:.2f}",
+          f"{row['model_bytes_float32'] / 1024:.2f}",
+          f"{row.get('communication_bytes_float32', 0) / (1024 ** 2):.2f}"]
+         for name, row in r["cost_benchmark"]["rows"].items()]
+    )
 print(f"Wrote figures and CSV tables under {ROOT}")

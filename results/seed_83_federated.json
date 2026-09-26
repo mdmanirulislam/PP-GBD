@@ -1,0 +1,1 @@
+{"final": {"precision": 0.8689095127610209, "recall": 0.7314453125, "f1": 0.794273594909862, "auc": 0.9829921875, "average_precision": 0.8848870806381277, "train_time_s": 140.82220230007078, "infer_time_per_graph_ms": 8.848062498145737, "parameters": 4929, "model_bytes_float64": 39432, "model_bytes_float32": 19716, "communication_bytes_float32": 9463680}}

@@ -1,0 +1,48 @@
+{
+  "seed": 11,
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.12.14",
+  "rows": {
+    "GCN": {
+      "train_time_s": 66.73855450004339,
+      "infer_time_per_graph_ms": 6.2711181250051595,
+      "peak_traced_memory_mb": 12.619144439697266,
+      "parameters": 4929,
+      "model_bytes_float64": 39432,
+      "model_bytes_float32": 19716
+    },
+    "GCN-poly": {
+      "train_time_s": 95.4719528000569,
+      "infer_time_per_graph_ms": 10.32037249970017,
+      "peak_traced_memory_mb": 12.619227409362793,
+      "parameters": 4929,
+      "model_bytes_float64": 39432,
+      "model_bytes_float32": 19716
+    },
+    "DP-GCN-eps4": {
+      "train_time_s": 47.25005090003833,
+      "infer_time_per_graph_ms": 6.2711181250051595,
+      "peak_traced_memory_mb": 12.619071960449219,
+      "parameters": 4929,
+      "model_bytes_float64": 39432,
+      "model_bytes_float32": 19716
+    },
+    "DP-MLP-eps4": {
+      "train_time_s": 40.68720179994125,
+      "infer_time_per_graph_ms": 4.595658124890178,
+      "peak_traced_memory_mb": 11.091552734375,
+      "parameters": 4929,
+      "model_bytes_float64": 39432,
+      "model_bytes_float32": 19716
+    },
+    "FedAvg": {
+      "train_time_s": 129.40502579999156,
+      "infer_time_per_graph_ms": 6.2711181250051595,
+      "peak_traced_memory_mb": 12.544157028198242,
+      "parameters": 4929,
+      "model_bytes_float64": 39432,
+      "model_bytes_float32": 19716,
+      "communication_bytes_float32": 9463680
+    }
+  }
+}

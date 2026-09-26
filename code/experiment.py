@@ -15,15 +15,18 @@ Components:
   5. Federated (FedAvg) training across 4 non-IID clients (one topology each).
   6. Auxiliary host-loss membership diagnostic (not aligned with graph-level adjacency).
 
-Run:  python experiment.py models|dp|fed <seed>, then python experiment.py agg
+Run: python experiment.py models|dp|fed|ablations <seed>
+     python experiment.py cost [seed]
+     python experiment.py agg
 """
 
-import json, math, os, time
+import json, math, os, platform, time, tracemalloc
 import numpy as np
 import networkx as nx
 import scipy.sparse as sp
+from scipy import stats
 
-RNG_SEEDS = [11, 23, 47]
+RNG_SEEDS = [11, 23, 47, 59, 83]
 N_BG = 3000            # background (benign) nodes per graph
 N_BOT = 128            # bots per graph
 FEAT_DIM = 10
@@ -35,6 +38,8 @@ DP_EPOCHS = 100
 LR = 0.01
 DELTA = 1e-3
 PUBLIC_SLOTS = 32      # public graph-contribution slots for add/remove DP adjacency
+PUBLIC_POS_WEIGHT = N_BG / N_BOT  # fixed from the public benchmark design
+CLIP_NORMS = [0.25, 0.5, 1.0, 2.0]
 OUT = os.path.join(os.path.dirname(__file__), "..", "results")
 
 # ----------------------------------------------------------------------------
@@ -122,8 +127,11 @@ def make_graph(topo, rng):
     g = nx.powerlaw_cluster_graph(N_BG + N_BOT, m=2, p=0.10, seed=int(rng.integers(1e9)))
     n = g.number_of_nodes()
     bot_ids = rng.choice(n, size=N_BOT, replace=False)
-    for (a, b) in botnet_overlay_edges(bot_ids, topo, rng):
-        g.add_edge(int(bot_ids[a]), int(bot_ids[b]))
+    overlay = botnet_overlay_edges(bot_ids, topo, rng)
+    overlay_unique = {tuple(sorted((int(bot_ids[a]), int(bot_ids[b])))) for a, b in overlay}
+    overlay_added = sum(not g.has_edge(a, b) for a, b in overlay_unique)
+    for a, b in overlay_unique:
+        g.add_edge(a, b)
     y = np.zeros(n, dtype=np.float64); y[bot_ids] = 1.0
     X = np.empty((n, FEAT_DIM))
     X[y == 0] = sample_features(False, int((y == 0).sum()), rng)
@@ -138,7 +146,10 @@ def make_graph(topo, rng):
     d = np.asarray(A.sum(1)).ravel()
     Dm = sp.diags(1.0 / np.sqrt(d))
     A_hat = (Dm @ A @ Dm).tocsr()
-    return {"A": A_hat, "X": X, "y": y, "AX": A_hat @ X, "topo": topo}
+    return {"A": A_hat, "X": X, "y": y, "AX": A_hat @ X, "topo": topo,
+            "overlay_contact_records": len(overlay),
+            "overlay_unique_edges": len(overlay_unique),
+            "overlay_added_edges": int(overlay_added)}
 
 
 def build_dataset(seed):
@@ -219,11 +230,13 @@ def unflat(v, P, keys):
 
 
 def train(graphs, rng, kind="relu", use_graph=True, epochs=EPOCHS, lr=LR,
-          clip=None, sigma=0.0, dims=None, pos_w=None, public_slots=None):
+          clip=None, sigma=0.0, dims=None, pos_w=None, public_slots=None,
+          diagnostics=None):
     dims = dims or [FEAT_DIM, HID, HID, 1]
     if pos_w is None:
-        pos = sum(g["y"].sum() for g in graphs); tot = sum(len(g["y"]) for g in graphs)
-        pos_w = (tot - pos) / pos
+        # The class weight is fixed by the public benchmark design rather than
+        # estimated from the protected training slots.
+        pos_w = PUBLIC_POS_WEIGHT
     P = init_params(rng, dims)
     keys = sorted(P.keys())
     m = {k: np.zeros_like(P[k]) for k in keys}
@@ -232,6 +245,9 @@ def train(graphs, rng, kind="relu", use_graph=True, epochs=EPOCHS, lr=LR,
     B = len(graphs) if public_slots is None else int(public_slots)
     if B < len(graphs):
         raise ValueError("public_slots cannot be smaller than the number of supplied graphs")
+    if diagnostics is not None:
+        diagnostics.update({"gradient_records": 0, "clipped_records": 0,
+                            "clip_norm": clip, "noise_multiplier": sigma})
     # When public_slots > len(graphs), absent slots contribute the zero gradient.
     # The denominator is public and fixed, which is required by the add/remove
     # graph-adjacency proof used for the DP experiments.
@@ -241,7 +257,11 @@ def train(graphs, rng, kind="relu", use_graph=True, epochs=EPOCHS, lr=LR,
             _, G, _ = loss_and_grads(P, g, kind, pos_w, use_graph)
             gv = flat(G, keys)
             if clip is not None:
-                gv = gv * min(1.0, clip / (np.linalg.norm(gv) + 1e-12))
+                norm = np.linalg.norm(gv)
+                if diagnostics is not None:
+                    diagnostics["gradient_records"] += 1
+                    diagnostics["clipped_records"] += int(norm > clip)
+                gv = gv * min(1.0, clip / (norm + 1e-12))
             acc += gv
         if sigma > 0:
             acc += rng.normal(0.0, sigma * clip, size=acc.shape)
@@ -252,6 +272,10 @@ def train(graphs, rng, kind="relu", use_graph=True, epochs=EPOCHS, lr=LR,
             v[k] = b2 * v[k] + (1 - b2) * Gm[k] ** 2
             mh = m[k] / (1 - b1 ** t); vh = v[k] / (1 - b2 ** t)
             P[k] -= lr * mh / (np.sqrt(vh) + adam_eps)
+    if diagnostics is not None and diagnostics["gradient_records"]:
+        diagnostics["clipped_fraction"] = (
+            diagnostics["clipped_records"] / diagnostics["gradient_records"]
+        )
     return P, pos_w
 
 
@@ -366,8 +390,7 @@ def node_loss_mia_auc(P, kind, train_g, test_g, pos_w, rng):
 def fedavg(splits, rng, rounds=60, local_steps=4, lr_local=0.15, kind="relu"):
     dims = [FEAT_DIM, HID, HID, 1]
     P = init_params(rng, dims); keys = sorted(P.keys())
-    pos = sum(g["y"].sum() for g in splits["train"]); tot = sum(len(g["y"]) for g in splits["train"])
-    pos_w = (tot - pos) / pos
+    pos_w = PUBLIC_POS_WEIGHT
     clients = {t: [g for g in splits["train"] if g["topo"] == t] for t in TOPOLOGIES}
     for r in range(1, rounds + 1):
         new = {k: np.zeros_like(P[k]) for k in keys}
@@ -386,6 +409,39 @@ def fedavg(splits, rng, rounds=60, local_steps=4, lr_local=0.15, kind="relu"):
         P = new
     return P
 
+
+def inference_ms(P, kind, graphs, use_graph=True, repeats=5):
+    # Warm the sparse kernels before timing and average several passes because
+    # a single eight-graph pass is too noisy for an overhead comparison.
+    for g in graphs:
+        predict(P, g, kind, use_graph)
+    t0 = time.perf_counter()
+    for _ in range(repeats):
+        for g in graphs:
+            predict(P, g, kind, use_graph)
+    return (time.perf_counter() - t0) / (len(graphs) * repeats) * 1e3
+
+
+def parameter_summary(P):
+    count = int(sum(v.size for v in P.values()))
+    return {"parameters": count,
+            "model_bytes_float64": int(sum(v.nbytes for v in P.values())),
+            "model_bytes_float32": int(count * 4)}
+
+
+def dataset_overlay_summary(splits):
+    out = {}
+    all_graphs = splits["train"] + splits["val"] + splits["test"]
+    for topo in TOPOLOGIES:
+        gs = [g for g in all_graphs if g["topo"] == topo]
+        out[topo] = {
+            key: {"mean": float(np.mean([g[key] for g in gs])),
+                  "min": int(np.min([g[key] for g in gs])),
+                  "max": int(np.max([g[key] for g in gs]))}
+            for key in ["overlay_contact_records", "overlay_unique_edges", "overlay_added_edges"]
+        }
+    return out
+
 # ----------------------------------------------------------------------------
 # 7. Staged experimental protocol
 #    python experiment.py models <seed> | dp <seed> | fed <seed> | agg
@@ -399,6 +455,7 @@ def part_path(part, seed):
         "models": f"seed_{seed}_models.json",
         "dp": f"seed_{seed}_dp.json",
         "fed": f"seed_{seed}_federated.json",
+        "ablations": f"seed_{seed}_ablations.json",
     }
     return os.path.join(OUT, names[part])
 
@@ -410,20 +467,21 @@ def run_models(seed):
              "MLP": dict(kind="relu", use_graph=False, dims=[FEAT_DIM, HID, HID, 1]),
              "GCN": dict(kind="relu", use_graph=True,  dims=[FEAT_DIM, HID, HID, 1]),
              "GCN-poly": dict(kind="poly", use_graph=True, dims=[FEAT_DIM, HID, HID, 1])}
-    out = {"models": {}, "roc": {}}
+    out = {"models": {}, "roc": {},
+           "overlay_summary": dataset_overlay_summary(splits)}
     for name, spec in specs.items():
-        t0 = time.time()
+        t0 = time.perf_counter()
         P, pw = train(tr, np.random.default_rng(seed + 1000), kind=spec["kind"],
                       use_graph=spec["use_graph"], dims=spec["dims"])
-        t_train = time.time() - t0
+        t_train = time.perf_counter() - t0
         per_topo = name in ("LR", "MLP", "GCN")
         res, (yt, st) = evaluate(P, spec["kind"], va, te,
                                  use_graph=spec["use_graph"], per_topo=per_topo)
         res["train_time_s"] = t_train
-        t0 = time.time()
-        for g in te:
-            predict(P, g, spec["kind"], spec["use_graph"])
-        res["infer_time_per_graph_ms"] = (time.time() - t0) / len(te) * 1e3
+        res["infer_time_per_graph_ms"] = inference_ms(
+            P, spec["kind"], te, spec["use_graph"]
+        )
+        res.update(parameter_summary(P))
         if name == "GCN":
             res["node_loss_mia_auc"] = node_loss_mia_auc(P, "relu", tr, te, pw, np.random.default_rng(seed + 5))
         out["models"][name] = res
@@ -440,11 +498,17 @@ def run_dp(seed):
     sigmas = {e: sigma_for_eps(e, DP_EPOCHS) for e in EPS_TARGETS}
     out = {"sigmas": {str(e): sigmas[e] for e in EPS_TARGETS}, "by_eps": {}}
     for e in EPS_TARGETS:
+        diag = {}
+        t0 = time.perf_counter()
         P, pw = train(tr, np.random.default_rng(seed + 2000), kind="relu",
                       epochs=DP_EPOCHS, clip=1.0, sigma=sigmas[e],
-                      public_slots=PUBLIC_SLOTS)
+                      public_slots=PUBLIC_SLOTS, diagnostics=diag)
+        diag["train_time_s"] = time.perf_counter() - t0
         res, _ = evaluate(P, "relu", va, te)
         res["node_loss_mia_auc"] = node_loss_mia_auc(P, "relu", tr, te, pw, np.random.default_rng(seed + 6))
+        res["infer_time_per_graph_ms"] = inference_ms(P, "relu", te)
+        res.update(parameter_summary(P))
+        res["training_diagnostics"] = diag
         out["by_eps"][str(e)] = res
         print(f"  DP eps={e:<4} sigma={sigmas[e]:.2f} F1={res['f1']:.3f} "
               f"node-loss diagnostic={res['node_loss_mia_auc']:.3f}", flush=True)
@@ -454,19 +518,117 @@ def run_dp(seed):
 
 def run_fed(seed):
     splits = build_dataset(seed)
+    t0 = time.perf_counter()
     Pf = fedavg(splits, np.random.default_rng(seed + 3000))
+    train_time_s = time.perf_counter() - t0
     resf, _ = evaluate(Pf, "relu", splits["val"], splits["test"])
+    resf["train_time_s"] = train_time_s
+    resf["infer_time_per_graph_ms"] = inference_ms(Pf, "relu", splits["test"])
+    resf.update(parameter_summary(Pf))
+    resf["communication_bytes_float32"] = int(
+        60 * len(TOPOLOGIES) * resf["parameters"] * 4 * 2
+    )
     print(f"  FedAvg F1={resf['f1']:.3f} AUC={resf['auc']:.3f}", flush=True)
     with open(part_path("fed", seed), "w") as f:
         json.dump({"final": resf}, f)
 
 
+def run_ablations(seed):
+    """Clipping sweep and a matched feature-only private baseline at eps=4."""
+    splits = build_dataset(seed)
+    tr, va, te = splits["train"], splits["val"], splits["test"]
+    sigma = sigma_for_eps(4.0, DP_EPOCHS)
+    out = {"epsilon": 4.0, "sigma": sigma, "clipping_sweep": {}}
+    for clip in CLIP_NORMS:
+        diag = {}
+        t0 = time.perf_counter()
+        P, _ = train(tr, np.random.default_rng(seed + 2000), kind="relu",
+                     epochs=DP_EPOCHS, clip=clip, sigma=sigma,
+                     public_slots=PUBLIC_SLOTS, diagnostics=diag)
+        diag["train_time_s"] = time.perf_counter() - t0
+        res, _ = evaluate(P, "relu", va, te)
+        res["infer_time_per_graph_ms"] = inference_ms(P, "relu", te)
+        res["training_diagnostics"] = diag
+        out["clipping_sweep"][str(clip)] = res
+        print(f"  clip={clip:<4} F1={res['f1']:.3f} clipped={diag['clipped_fraction']:.3f}", flush=True)
+
+    diag = {}
+    t0 = time.perf_counter()
+    Pm, _ = train(tr, np.random.default_rng(seed + 2100), kind="relu",
+                  use_graph=False, epochs=DP_EPOCHS, clip=1.0, sigma=sigma,
+                  public_slots=PUBLIC_SLOTS, diagnostics=diag)
+    diag["train_time_s"] = time.perf_counter() - t0
+    resm, _ = evaluate(Pm, "relu", va, te, use_graph=False)
+    resm["infer_time_per_graph_ms"] = inference_ms(Pm, "relu", te, False)
+    resm["training_diagnostics"] = diag
+    resm.update(parameter_summary(Pm))
+    out["dp_mlp"] = resm
+    print(f"  DP-MLP eps=4 F1={resm['f1']:.3f}", flush=True)
+    with open(part_path("ablations", seed), "w") as f:
+        json.dump(out, f)
+
+
+def run_cost(seed=11):
+    """Single-machine cost benchmark for all implemented deployment profiles."""
+    splits = build_dataset(seed)
+    tr, va, te = splits["train"], splits["val"], splits["test"]
+    sigma = sigma_for_eps(4.0, DP_EPOCHS)
+    rows = {}
+
+    def measure(name, fn, kind="relu", use_graph=True):
+        tracemalloc.start()
+        t0 = time.perf_counter()
+        P = fn()
+        elapsed = time.perf_counter() - t0
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        row = {"train_time_s": elapsed,
+               "infer_time_per_graph_ms": inference_ms(P, kind, te, use_graph),
+               "peak_traced_memory_mb": peak / (1024 ** 2)}
+        row.update(parameter_summary(P))
+        rows[name] = row
+        print(f"  {name:12s} train={elapsed:.1f}s peak={row['peak_traced_memory_mb']:.1f}MB", flush=True)
+        return P
+
+    measure("GCN", lambda: train(tr, np.random.default_rng(seed + 1000))[0])
+    measure("GCN-poly", lambda: train(tr, np.random.default_rng(seed + 1000), kind="poly")[0], kind="poly")
+    measure("DP-GCN-eps4", lambda: train(
+        tr, np.random.default_rng(seed + 2000), epochs=DP_EPOCHS,
+        clip=1.0, sigma=sigma, public_slots=PUBLIC_SLOTS)[0])
+    measure("DP-MLP-eps4", lambda: train(
+        tr, np.random.default_rng(seed + 2100), use_graph=False,
+        epochs=DP_EPOCHS, clip=1.0, sigma=sigma,
+        public_slots=PUBLIC_SLOTS)[0], use_graph=False)
+    pf = measure("FedAvg", lambda: fedavg(splits, np.random.default_rng(seed + 3000)))
+    rows["FedAvg"]["communication_bytes_float32"] = int(
+        60 * len(TOPOLOGIES) * rows["FedAvg"]["parameters"] * 4 * 2
+    )
+    # Inference cost depends on architecture, not learned weights. Re-benchmark
+    # the three identical ReLU GCN paths with one common initialized model to
+    # avoid thermal/load drift after their different training procedures.
+    gcn_probe = init_params(np.random.default_rng(seed + 9000), [FEAT_DIM, HID, HID, 1])
+    gcn_ms = inference_ms(gcn_probe, "relu", te, True, repeats=20)
+    for name in ["GCN", "DP-GCN-eps4", "FedAvg"]:
+        rows[name]["infer_time_per_graph_ms"] = gcn_ms
+    rows["GCN-poly"]["infer_time_per_graph_ms"] = inference_ms(
+        gcn_probe, "poly", te, True, repeats=20
+    )
+    rows["DP-MLP-eps4"]["infer_time_per_graph_ms"] = inference_ms(
+        gcn_probe, "relu", te, False, repeats=20
+    )
+    output = os.path.join(OUT, "cost_benchmark.json")
+    with open(output, "w") as f:
+        json.dump({"seed": seed, "platform": platform.platform(),
+                   "python": platform.python_version(), "rows": rows}, f, indent=2)
+
+
 def aggregate():
-    """Aggregate registered per-seed results using sample standard deviation."""
+    """Aggregate registered per-seed results with sample SD and 95% t CI."""
     def summ(vals):
         v = np.asarray(vals, dtype=float)
-        return {"mean": float(v.mean()),
-                "std": float(v.std(ddof=1)) if len(v) > 1 else 0.0}
+        sd = float(v.std(ddof=1)) if len(v) > 1 else 0.0
+        ci = float(stats.t.ppf(0.975, len(v) - 1) * sd / math.sqrt(len(v))) if len(v) > 1 else 0.0
+        return {"mean": float(v.mean()), "std": sd, "ci95": ci, "n": int(len(v))}
 
     results = {
         "config": {
@@ -477,15 +639,17 @@ def aggregate():
             "topologies": TOPOLOGIES,
             "dp_adjacency": "add/remove over fixed public contribution slots",
             "public_slots": PUBLIC_SLOTS,
-            "dispersion": "sample standard deviation (ddof=1)"
+            "public_positive_class_weight": PUBLIC_POS_WEIGHT,
+            "dispersion": "sample standard deviation and two-sided 95% Student-t confidence interval"
         },
         "models": {}, "models_per_topology": {}, "dp": {}, "federated": {},
-        "node_loss_diagnostic": {}
+        "node_loss_diagnostic": {}, "ablations": {}, "overlay_edges": {}
     }
 
     mods = [json.load(open(part_path("models", s))) for s in RNG_SEEDS]
     dps = [json.load(open(part_path("dp", s))) for s in RNG_SEEDS]
     feds = [json.load(open(part_path("fed", s))) for s in RNG_SEEDS]
+    abls = [json.load(open(part_path("ablations", s))) for s in RNG_SEEDS]
 
     metric_keys = ["precision", "recall", "f1", "auc", "average_precision",
                    "train_time_s", "infer_time_per_graph_ms"]
@@ -529,16 +693,55 @@ def aggregate():
         k: summ([f["final"][k] for f in feds])
         for k in ["precision", "recall", "f1", "auc"]
     }
+    fed_params = sum(v.size for v in init_params(
+        np.random.default_rng(0), [FEAT_DIM, HID, HID, 1]
+    ).values())
+    results["federated"]["parameters"] = int(fed_params)
+    results["federated"]["communication_bytes_float32"] = int(
+        60 * len(TOPOLOGIES) * fed_params * 4 * 2
+    )
     results["federated"]["protocol_note"] = (
         "FedAvg and centralized training use different optimizers and budgets; "
         "the performance gap is descriptive."
     )
+    results["ablations"]["epsilon"] = 4.0
+    results["ablations"]["clipping_sweep"] = {
+        str(c): {
+            k: summ([a["clipping_sweep"][str(c)][k] for a in abls])
+            for k in ["precision", "recall", "f1", "auc"]
+        } | {
+            "clipped_fraction": summ([
+                a["clipping_sweep"][str(c)]["training_diagnostics"]["clipped_fraction"]
+                for a in abls
+            ])
+        }
+        for c in CLIP_NORMS
+    }
+    results["ablations"]["dp_mlp_eps4"] = {
+        k: summ([a["dp_mlp"][k] for a in abls])
+        for k in ["precision", "recall", "f1", "auc"]
+    }
+
+    overlay_summaries = [
+        m.get("overlay_summary") or dataset_overlay_summary(build_dataset(seed))
+        for seed, m in zip(RNG_SEEDS, mods)
+    ]
+    for topo in TOPOLOGIES:
+        results["overlay_edges"][topo] = {}
+        for key in ["overlay_contact_records", "overlay_unique_edges", "overlay_added_edges"]:
+            vals = [summary[topo][key]["mean"] for summary in overlay_summaries]
+            results["overlay_edges"][topo][key] = summ(vals)
+
+    cost_path = os.path.join(OUT, "cost_benchmark.json")
+    if os.path.exists(cost_path):
+        results["cost_benchmark"] = json.load(open(cost_path))
     results["curve_data_seed_11"] = mods[0]["roc"]
     results["per_seed"] = {
         "models": {name: [m["models"][name] for m in mods]
                    for name in ["LR", "MLP", "GCN", "GCN-poly"]},
         "dp": [d["by_eps"] for d in dps],
-        "federated": [f["final"] for f in feds]
+        "federated": [f["final"] for f in feds],
+        "ablations": abls
     }
 
     output = os.path.join(OUT, "aggregate_results.json")
@@ -553,7 +756,10 @@ if __name__ == "__main__":
     part = sys.argv[1]
     if part == "agg":
         aggregate()
+    elif part == "cost":
+        run_cost(int(sys.argv[2]) if len(sys.argv) > 2 else 11)
     else:
         seed = int(sys.argv[2])
         print(f"=== {part} seed {seed} ===", flush=True)
-        {"models": run_models, "dp": run_dp, "fed": run_fed}[part](seed)
+        {"models": run_models, "dp": run_dp, "fed": run_fed,
+         "ablations": run_ablations}[part](seed)
